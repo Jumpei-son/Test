@@ -1771,19 +1771,20 @@ contains
     real, intent(in) :: time_day
 
     integer :: nz, k_srf
-    real :: z_srf, rho_in, z_in, b_in
-    integer, pointer :: kc_bot(:)
-    real, pointer :: z(:), zc(:), dz(:), rho_(:), dx(:)
+    real :: z_srf, rho_in, z_in, rho_s1, rho_s2, rho_s3
+    integer, pointer :: kc_bot(:), k_bot(:)
+    real, pointer :: z(:), zc(:), dz(:), rho_(:), dx(:), z_bed(:)
+    real, pointer :: rho(:,:)
     type(domain), pointer :: dom_up
 
     integer :: i, k, kc, kc_min, kb
-    real :: tmp, eps, delta, zeta, drho, sum_vol
+    real :: tmp, eps, delta, zeta
     real, allocatable :: array(:), f(:), infwgt(:)
     real, pointer, dimension(:,:) :: vol
 
     !--- pointer and allocate arrays ---------------
-    nz=dom%nz; k_srf=dom%k_srf; z_srf=dom%z_srf; kc_bot=>dom%kc_bot
-    z=>dom%z; zc=>dom%zc; dz=>dom%dz; rho_=>dom%rho_avg
+    nz=dom%nz; k_srf=dom%k_srf; z_srf=dom%z_srf; kc_bot=>dom%kc_bot; k_bot=>dom%k_bot
+    z=>dom%z; zc=>dom%zc; dz=>dom%dz; rho_=>dom%rho_avg; z_bed=>dom%z_bed; rho=>dom%rho
     dx=>dom%dx; vol=>dom%vol
     allocate (f(dom%nz))
     allocate (infwgt(k_srf))
@@ -1828,75 +1829,63 @@ contains
     kc = -1
     z_in = -999.
 
-    ! Set allways Surface Inflow (2024/05/01)
-      z_in = z_srf
-      kc = k_srf
-      
-    ! normalized density gradient, 1/m
-    eps = -(rho_(kc) - rho_(kc-1))/(z(kc) - z(kc-1))/rho_water
-    eps = max(1.e-6, eps)
-
-    ! weighting for vertical distributed inlet velocity
+    ! Set river inflow level by density (2025/06/05)
     i = dom%i_inlet(k_srf)
-    kb = kc_bot(i)
 
-    if ((k_srf - kb + 1) == 1) then         ! 1 cell inflow
-      tmp = 1.e-8
-      do k=kb, k_srf
-        tmp = tmp + dom%au(i,k)
-      enddo
-      dom%u(i,k_srf) = dom%q_in/tmp
+    ! Density for dicision inflow layer
+    rho_s1 = rho_(k_srf)
+    rho_s2 = rho_(k_srf-1)
+    rho_s3 = rho_(k_srf-2)
 
-    else if ((k_srf - kb + 1) == 2) then    ! 2 cells inflow
-      if (rho_(k_srf) > rho_in) then            ! surface density heavier than inflow density
-        tmp = 1.e-8
-        do k=kb, k_srf
-          tmp = tmp + dom%au(i,k)
-        enddo
-        dom%u(i,k_srf) = dom%q_in/tmp*2/3
-        dom%u(i,k_srf-1) = dom%q_in/tmp*1/3
-      else                                       ! surface density lighter than inflow density
-        dom%u(i,k_srf) = dom%q_in/tmp*1/3
-        dom%u(i,k_srf-1) = dom%q_in/tmp*2/3
+    ! Check layer number at inlet
+    if ((k_srf - k_bot(i) + 2) == 0 .or. (k_srf - k_bot(i) + 2) == 1) then      ! 1 cell inflow
+      dom%u(i,k_srf) = dom%q_in/dom%au(i,k_srf)
+      z_in = z(k_srf)
+
+    else if ((k_srf - k_bot(i) + 2) == 2) then  ! 2 cells inflow
+      if (rho_s1 > rho_in) then            ! surface density heavier than inflow density
+        dom%u(i,k_srf) = dom%q_in/dom%au(i,k_srf)*3/4
+        dom%u(i,k_srf-1) = dom%q_in/dom%au(i,k_srf-1)*1/4
+        z_in = z(k_srf)
+      else                                      ! surface density lighter than inflow density
+        dom%u(i,k_srf) = dom%q_in/dom%au(i,k_srf)*1/4
+        dom%u(i,k_srf-1) = dom%q_in/dom%au(i,k_srf-1)*3/4
+        z_in = z(k_srf-1)
       endif
 
-    else if ((k_srf - kb + 1) == 3) then    ! 3 cells inflow
-      if (rho_(k_srf) > rho_in .and. rho_(k_srf-1) > rho_in) then    ! surface and 2nd layer density heavier than inflow density
-        tmp = 1.e-8
-        do k=kb, k_srf
-          tmp = tmp + dom%au(i,k)
-        enddo
-        dom%u(i,k_srf) = dom%q_in/tmp*5/9
-        dom%u(i,k_srf-1) = dom%q_in/tmp*3/9
-        dom%u(i,k_srf-2) = dom%q_in/tmp*1/9
-      else if (rho_(k_srf) < rho_in .and. rho_(k_srf-1) < rho_in) then    ! surface and 2nd density lighter than inflow density
-        dom%u(i,k_srf) = dom%q_in/tmp*1/9
-        dom%u(i,k_srf-1) = dom%q_in/tmp*3/9
-        dom%u(i,k_srf-2) = dom%q_in/tmp*5/9
+    else if ((k_srf - k_bot(i) + 2) == 3) then        ! 3 cells inflow
+      if (rho_s1 > rho_in .and. rho_s2 > rho_in) then    ! surface and 2nd layer density heavier than inflow density
+        dom%u(i,k_srf) = dom%q_in/dom%au(i,k_srf)*5/9
+        dom%u(i,k_srf-1) = dom%q_in/dom%au(i,k_srf-1)*3/9
+        dom%u(i,k_srf-2) = dom%q_in/dom%au(i,k_srf-2)*1/9
+        z_in = z(k_srf)
+      else if (rho_s1 < rho_in .and. rho_s2 < rho_in) then    ! surface and 2nd density lighter than inflow density
+        dom%u(i,k_srf) = dom%q_in/dom%au(i,k_srf)*1/9
+        dom%u(i,k_srf-1) = dom%q_in/dom%au(i,k_srf-1)*3/9
+        dom%u(i,k_srf-2) = dom%q_in/dom%au(i,k_srf-2)*5/9
+        z_in = z(k_srf-2)
       else
-        dom%u(i,k_srf) = dom%q_in/tmp*1/6
-        dom%u(i,k_srf-1) = dom%q_in/tmp*4/6
-        dom%u(i,k_srf-2) = dom%q_in/tmp*1/6
+        dom%u(i,k_srf) = dom%q_in/dom%au(i,k_srf)*1/6
+        dom%u(i,k_srf-1) = dom%q_in/dom%au(i,k_srf-1)*4/6
+        dom%u(i,k_srf-2) = dom%q_in/dom%au(i,k_srf-2)*1/6
+        z_in = z(k_srf-1)
       endif
-
-    else if ((k_srf - kb + 1) > 3) then    ! more than 4 cells inflow
-      if (rho_(k_srf) > rho_in .and. rho_(k_srf-1) > rho_in) then    ! surface and 2nd layer density heavier than inflow density
-        tmp = 1.e-8
-        do k=kb, k_srf
-          tmp = tmp + dom%au(i,k)
-        enddo
-        dom%u(i,k_srf) = 0.2
-        dom%u(i,k_srf-1) = 0.1
-        dom%u(i,k_srf-2) = 0.05
-      else if (rho_(k_srf) < rho_in .and. rho_(k_srf-1) < rho_in) then    ! surface and 2nd density lighter than inflow density
-        dom%u(i,kb+2) = 0.2
-        dom%u(i,kb+1) = 0.1
-        dom%u(i,kb) = 0.05
+    else if ((k_srf - k_bot(i) + 2) > 3) then        ! 4 cells inflow
+      if (rho_s1 > rho_in .and. rho_s2 > rho_in) then    ! surface and 2nd layer density heavier than inflow density
+        dom%u(i,k_srf) = dom%q_in/dom%au(i,k_srf)*5/9
+        dom%u(i,k_srf-1) = dom%q_in/dom%au(i,k_srf-1)*3/9
+        dom%u(i,k_srf-2) = dom%q_in/dom%au(i,k_srf-2)*1/9
+        z_in = z(k_srf)
+      else if (rho_s1 > rho_in .and. rho_s2 > rho_in) then    ! surface and 2nd layer density heavier than inflow density
+        dom%u(i,k_bot(i)) = dom%q_in/dom%au(i,k_srf)*5/9
+        dom%u(i,k_bot(i)+1) = dom%q_in/dom%au(i,k_srf-1)*3/9
+        dom%u(i,k_bot(i)+2) = dom%q_in/dom%au(i,k_srf-2)*1/9
+        z_in = z(k_bot(i))
       else
-        dom%u(i,k_srf) = 0.2
-        dom%u(i,k_srf-1) = 0.1
-        dom%u(i,k_srf-2) = 0.05
-        dom%u(i,k_srf-3) = 0.01
+        dom%u(i,k_srf) = dom%q_in/dom%au(i,k_srf)*1/6
+        dom%u(i,k_srf-1) = dom%q_in/dom%au(i,k_srf-1)*4/6
+        dom%u(i,k_srf-2) = dom%q_in/dom%au(i,k_srf-2)*1/6
+        z_in = z(k_srf-1)
       endif
     endif
 
@@ -3660,15 +3649,15 @@ contains
     enddo
 
     ! impose continuity on each column
-    do i=1, nx-1
-      q_col_ = 1e-10
-      do k=k_bot(i), k_srf
-        q_col_ = q_col_ + au(i,k)*dom%u(i,k)
-      enddo
-      do k=k_bot(i), k_srf
-        dom%u(i,k) = dom%u(i,k)*abs(dom%q_col(i)/q_col_)
-      enddo
-    enddo
+    !do i=1, nx-1
+    !  q_col_ = 1e-10
+    !  do k=k_bot(i), k_srf
+    !    q_col_ = q_col_ + au(i,k)*dom%u(i,k)
+    !  enddo
+    !  do k=k_bot(i), k_srf
+    !    dom%u(i,k) = dom%u(i,k)*abs(dom%q_col(i)/q_col_)
+    !  enddo
+    !enddo
 
     ! new w by continuity eq.
     do i=1, nx
